@@ -116,3 +116,12 @@ try-import %workspace%/fuzztest.bazelrc
 # External repository download caching and retry options.
 common --http_connector_attempts=10
 common --http_timeout_scaling=2.0
+
+# Abseil enables header-parsing actions, which have no source file and crash
+# the compile_commands.json generator (`bazel run :compile_commands`).
+build --features=-parse_headers
+build --host_features=-parse_headers
+
+# Tests that shell out (readelf, nm, ...) need the Nix shell's PATH; Bazel's
+# default test PATH only covers /bin and /usr/bin.
+test --test_env=PATH
