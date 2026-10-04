@@ -1,0 +1,112 @@
+name: Sync with upstream
+
+# Fork-only. Keeps this fork current with abseil/gloop:
+#
+#   main  an exact mirror of abseil/gloop main
+#   nix   main plus the Nix commit(s); the fork's default branch
+#
+# Each run rebases `nix` onto upstream main, builds a representative subset
+# inside the Nix shell, and only then moves both branches. If the rebase
+# conflicts or the build fails, neither branch moves and the run fails.
+
+on:
+  schedule:
+    # Daily at 09:17 UTC.
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build, test and push even if upstream has not changed"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/abseil/gloop.git
+
+jobs:
+  sync:
+    name: Rebase nix onto upstream main
+    # Scheduled runs only make sense in the fork, not if this file ever lands upstream.
+    if: ${{ github.repository != 'abseil/gloop' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: nix
+          fetch-depth: 0
+          # Upstream changes files under .github/workflows, which the default
+          # token may not push. SYNC_TOKEN is a personal access token with
+          # Contents and Workflows write access to this repository.
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Rebase onto upstream
+        id: rebase
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM"
+          git fetch --tags upstream main
+          git fetch origin main
+
+          if [ "$FORCE" != "true" ] &&
+             [ "$(git rev-parse origin/main)" = "$(git rev-parse upstream/main)" ] &&
+             git merge-base --is-ancestor upstream/main nix; then
+            echo "Already up to date with upstream."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # origin/main is the old base of `nix`, so this carries over exactly
+          # the fork's own commits even when upstream has rewritten history.
+          git rebase --onto upstream/main origin/main nix
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install Nix
+        if: ${{ steps.rebase.outputs.changed == 'true' }}
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+
+      - name: Cache Bazel outputs
+        if: ${{ steps.rebase.outputs.changed == 'true' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/bazel-disk
+          key: bazel-disk-${{ hashFiles('flake.lock', 'MODULE.bazel') }}-${{ github.run_id }}
+          restore-keys: |
+            bazel-disk-${{ hashFiles('flake.lock', 'MODULE.bazel') }}-
+            bazel-disk-
+
+      - name: Build and test in the Nix shell
+        if: ${{ steps.rebase.outputs.changed == 'true' }}
+        run: |
+          # A subset: the full suite is too large for a hosted runner.
+          nix develop -c bazel test \
+            --disk_cache="$HOME/.cache/bazel-disk" \
+            //gloop/ci/... \
+            //gloop/util/math/... \
+            //gloop/util/status/... \
+            @examples//...
+
+      - name: Push
+        if: ${{ steps.rebase.outputs.changed == 'true' }}
+        run: |
+          # Both branches move together, so `nix` is always based on `main`.
+          # The dated tag keeps this commit reachable after later rebases, so
+          # projects that pin it with git_override keep working.
+          tag="nix-$(date -u +%Y%m%d)"
+          git tag --force "$tag" nix
+          git push --force --atomic origin \
+            refs/remotes/upstream/main:refs/heads/main \
+            nix:refs/heads/nix \
+            "refs/tags/$tag"
+          # Upstream's release tags; never overwritten.
+          git push origin --tags || echo "::warning::Some upstream tags were not pushed."

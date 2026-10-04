@@ -1,5 +1,8 @@
 # Gloop
 
+> This is a fork that adds a Nix dev shell. See [NIX.md](NIX.md) for setup and
+> for how to depend on Gloop from your own project.
+
 Gloop is a library designed to speed up the transition of internal code to open
 source, minimizing friction for projects moving out of Google's internal
 monorepo (google3). It contains primarily common C++ libraries that were
